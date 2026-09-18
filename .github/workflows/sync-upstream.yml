@@ -4,13 +4,18 @@ name: 🔄 Sync upstream / 同步上游更新
 #
 # 使用说明：
 #   1. 首次使用需在仓库 Actions 页面手动启用 workflow。
-#   2. 默认使用内置 GITHUB_TOKEN 推送。由 GITHUB_TOKEN 触发的 push 不会再触发
-#      其他 workflow，因此同步后「不会」自动重新部署。
-#   3. 如需同步后自动部署，请到 Settings → Secrets and variables → Actions →
-#      Variables 新增变量 AUTO_DEPLOY_AFTER_SYNC = true。
-#   4. 如配置了 Secrets → SYNC_TOKEN（个人访问令牌 PAT，需 repo + workflow 权限），
-#      则优先用它推送，此时同步的 push 会正常触发下游 workflow（如自动部署）。
-#   5. 若合并出现冲突，workflow 会创建/追加一个 Issue 并标记失败，需手动处理。
+#   2. 部署方式说明（重要）：
+#      - 本仓库的 Worker 通过 Cloudflare Git 集成（Workers Builds）部署，Cloudflare
+#        会监听每一次 push 自动构建并上线。因此本 workflow 同步推送后会自动完成
+#        部署，无需任何额外配置，也不需要 PAT。
+#      - 正因如此，请勿开启 AUTO_DEPLOY_AFTER_SYNC，否则会额外触发一次
+#        deploy-cloudflare.yml，造成重复部署。
+#      - 如果将来改用 GitHub Actions（deploy-cloudflare.yml）部署，需要注意：由内置
+#        GITHUB_TOKEN 触发的 push 不会创建新的 workflow run，同步后不会自动重新部署。
+#        届时可选：① 配置 Secrets -> SYNC_TOKEN（PAT，需 repo + workflow 权限）用它推送；
+#        ② 设置 Variables -> AUTO_DEPLOY_AFTER_SYNC = true，由本 workflow 显式调用
+#        gh workflow run 触发部署。
+#   3. 若合并出现冲突，workflow 会创建/追加一个 Issue 并标记失败，需手动处理。
 
 on:
   schedule:
