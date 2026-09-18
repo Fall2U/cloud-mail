@@ -26,3 +26,6 @@ mail-vue/dist
 .wrangler
 .venv
 git-tools.js
+
+# WorkBuddy AI 项目数据目录
+.workbuddy-ai/

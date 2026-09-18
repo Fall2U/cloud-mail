@@ -1,0 +1,199 @@
+name: 🔄 Sync upstream / 同步上游更新
+
+# 每天检测原仓库（maillab/cloud-mail）是否有新提交，有则自动合并到本 fork。
+#
+# 使用说明：
+#   1. 首次使用需在仓库 Actions 页面手动启用 workflow。
+#   2. 默认使用内置 GITHUB_TOKEN 推送。由 GITHUB_TOKEN 触发的 push 不会再触发
+#      其他 workflow，因此同步后「不会」自动重新部署。
+#   3. 如需同步后自动部署，请到 Settings → Secrets and variables → Actions →
+#      Variables 新增变量 AUTO_DEPLOY_AFTER_SYNC = true。
+#   4. 如配置了 Secrets → SYNC_TOKEN（个人访问令牌 PAT，需 repo + workflow 权限），
+#      则优先用它推送，此时同步的 push 会正常触发下游 workflow（如自动部署）。
+#   5. 若合并出现冲突，workflow 会创建/追加一个 Issue 并标记失败，需手动处理。
+
+on:
+  schedule:
+    # UTC 01:00 == 北京时间 09:00
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: "检测到无更新时也强制执行一次合并（用于排查问题）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: maillab/cloud-mail
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: main
+  ISSUE_TITLE: "⚠️ 上游同步冲突，需要手动处理"
+
+jobs:
+  sync:
+    name: 🔄 Sync from upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🚚 检出代码 / Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SYNC_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: ⚙️ 配置 git / Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 📡 获取上游仓库 / Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+          # 只取目标分支，避免拉取无关内容
+          git fetch upstream "refs/heads/${UPSTREAM_BRANCH}" --no-tags
+
+          # 统一以 FETCH_HEAD 解析出的 SHA 作为上游基准。
+          # 不依赖 upstream/<branch> 远程跟踪分支，避免因 prune / refspec
+          # 差异导致 ref 缺失，行为更可预期。
+          UPSTREAM_SHA=$(git rev-parse "FETCH_HEAD^{commit}")
+          echo "UPSTREAM_SHA=${UPSTREAM_SHA}" >> "$GITHUB_ENV"
+          echo "上游基准提交：${UPSTREAM_SHA}"
+
+      - name: 🔍 检测更新 / Detect updates
+        id: detect
+        run: |
+          BEHIND=$(git rev-list --count "HEAD..${UPSTREAM_SHA}")
+          AHEAD=$(git rev-list --count "${UPSTREAM_SHA}..HEAD")
+          LATEST=$(git log -1 --format='%h %s' "${UPSTREAM_SHA}")
+
+          {
+            echo "behind=${BEHIND}"
+            echo "ahead=${AHEAD}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "## 🔍 上游更新检测"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 上游仓库 | \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` |"
+            echo "| 上游领先本 fork | **${BEHIND}** 个提交 |"
+            echo "| 本 fork 独有提交 | ${AHEAD} 个提交 |"
+            echo "| 上游最新提交 | \`${LATEST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "✅ 检测到上游有 ${BEHIND} 个新提交，准备同步。"
+          else
+            echo "💤 上游暂无更新，无需同步。"
+          fi
+
+      - name: 🔀 合并上游更新 / Merge upstream
+        id: merge
+        if: steps.detect.outputs.has_update == 'true' || inputs.force_sync
+        run: |
+          set +e
+          git merge -m "chore: sync with upstream ${UPSTREAM_REPO}" "${UPSTREAM_SHA}"
+          STATUS=$?
+          set -e
+
+          if [ "$STATUS" -eq 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt 2>/dev/null || true
+            git merge --abort || true
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⬆️ 推送到 fork / Push to fork
+        if: steps.merge.outputs.status == 'ok'
+        env:
+          PUSH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${SYNC_BRANCH}"
+
+          {
+            echo ""
+            echo "## ✅ 同步完成"
+            echo ""
+            echo "已将上游 \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` 的 ${{ steps.detect.outputs.behind }} 个提交合并并推送到本仓库 \`${SYNC_BRANCH}\` 分支。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚀 触发部署 / Trigger deploy
+        if: steps.merge.outputs.status == 'ok' && vars.AUTO_DEPLOY_AFTER_SYNC == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run deploy-cloudflare.yml --ref "${SYNC_BRANCH}"
+          echo "🚀 已触发 deploy-cloudflare.yml" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ⚠️ 处理合并冲突 / Handle merge conflicts
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          CONFLICTS=$(cat /tmp/conflicts.txt 2>/dev/null || true)
+          [ -z "$CONFLICTS" ] && CONFLICTS="（未能获取冲突文件列表）"
+
+          BODY=$(cat <<EOF
+          自动同步上游 \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` 时发生**合并冲突**，已中止合并，本仓库分支未被修改。
+
+          运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          冲突文件：
+          \`\`\`
+          ${CONFLICTS}
+          \`\`\`
+
+          处理方式（本地执行）：
+          \`\`\`bash
+          git fetch https://github.com/${UPSTREAM_REPO}.git ${UPSTREAM_BRANCH}
+          git merge FETCH_HEAD
+          # 解决冲突后
+          git add .
+          git commit
+          git push origin ${SYNC_BRANCH}
+          \`\`\`
+          处理完成后关闭本 Issue，后续同步会恢复正常。
+          EOF
+          )
+
+          ISSUE_NUMBER=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg t "$ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -n1)
+
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+            echo "已在 Issue #${ISSUE_NUMBER} 追加冲突说明。"
+          else
+            gh issue create --title "${ISSUE_TITLE}" --body "$BODY"
+          fi
+
+          {
+            echo ""
+            echo "## ❌ 同步失败：存在合并冲突"
+            echo ""
+            echo "\`\`\`"
+            echo "${CONFLICTS}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 1
