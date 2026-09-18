@@ -1,0 +1,60 @@
+# 本 fork 专用部署配置 / Production deploy config for this fork
+#
+# 为什么需要这个文件：
+#   mail-worker/wrangler.toml 是上游仓库的文件，其中 D1 / KV / R2 绑定默认处于注释状态。
+#   Cloudflare Workers Builds 会用 wrangler.toml 执行 `npx wrangler deploy`，配置文件中
+#   未声明的绑定会在部署时被清空 —— 这就是每次部署后 KV / D1 绑定丢失的原因。
+#   （wrangler.toml 里的 keep_vars = true 只保护 [vars] 环境变量，不保护绑定。）
+#
+#   本文件独立于上游，永远不会和上游同步产生冲突。
+#
+# 启用方式（只需在 Cloudflare 面板改一次）：
+#   Workers & Pages -> cloud-mail -> Settings -> Builds
+#   把 Deploy command 改为：
+#       npx wrangler deploy -c wrangler.prod.toml
+#   Build command 保持不变（仍由 wrangler.toml 的 [build] 提供，即构建 mail-vue）。
+#
+# 注意事项：
+#   - name 必须与 Cloudflare 面板上的 Worker 名称完全一致
+#   - keep_vars = true 会保留面板上配置的环境变量（domain / admin / jwt_secret 等），
+#     所以这里不需要重复写 [vars]
+#   - 绑定名 db / kv / ai / assets 由代码硬编码，请勿修改
+#   - 上游更新 compatibility_date 时，建议同步修改本文件的值
+
+name = "cloud-mail"
+main = "src/index.js"
+compatibility_date = "2025-06-04"
+keep_vars = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "db"				# 绑定名，代码中通过 env.db 访问，不可修改
+database_name = "cloud-mail"
+database_id = "01205b66-458a-4375-bcfb-acd3ebf57da5"
+
+[[kv_namespaces]]
+binding = "kv"				# 绑定名，代码中通过 env.kv 访问，不可修改
+id = "36eb0da3d6154e7482a84820a21f4398"
+
+# 本部署未使用 R2 对象存储，因此不声明 [[r2_buckets]] 绑定。
+# 若以后启用，取消注释并填入桶名即可：
+# [[r2_buckets]]
+# binding = "r2"
+# bucket_name = "<桶名>"
+
+[ai]
+binding = "ai"
+
+[assets]
+binding = "assets"
+directory = "./dist"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[triggers]
+crons = ["0 * * * *"]		# 每小时执行；resetDaySendCount 仅在 UTC 0 点生效
+
+[build]
+command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"
